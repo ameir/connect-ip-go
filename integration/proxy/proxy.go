@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strconv"
 	"syscall"
 	"time"
@@ -30,19 +29,25 @@ var serverSocketRcv, serverSocketSend int
 
 const ifaceName = "eth1"
 
+const (
+	PROXY_ADDR  = "0.0.0.0"
+	PROXY_PORT  = "443"
+	ASSIGN_ADDR = "194.166.0.10"
+	//ROUTE              = "194.166.100.0/24"
+	ROUTE              = "0.0.0.0/0"
+	FILTER_IP_PROTOCOL = "0"
+	ipProtocol         = 0
+)
+
 func main() {
-	proxyPort, err := strconv.Atoi(os.Getenv("PROXY_PORT"))
+	proxyPort, err := strconv.Atoi(PROXY_PORT)
 	if err != nil {
 		log.Fatalf("failed to parse proxy port: %v", err)
 	}
-	bindProxyTo := netip.AddrPortFrom(netip.MustParseAddr(os.Getenv("PROXY_ADDR")), uint16(proxyPort))
+	bindProxyTo := netip.AddrPortFrom(netip.MustParseAddr(PROXY_ADDR), uint16(proxyPort))
 
-	assignAddr := netip.MustParseAddr(os.Getenv("ASSIGN_ADDR"))
-	route := netip.MustParsePrefix(os.Getenv("ROUTE"))
-	ipProtocol, err := strconv.ParseUint(os.Getenv("FILTER_IP_PROTOCOL"), 10, 8)
-	if err != nil {
-		log.Fatalf("failed to parse FILTER_IP_PROTOCOL: %v", err)
-	}
+	assignAddr := netip.MustParseAddr(ASSIGN_ADDR)
+	route := netip.MustParsePrefix(ROUTE)
 
 	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
@@ -90,7 +95,7 @@ func createReceiveSocket(a netip.Addr) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("creating socket: %w", err)
 	}
-	iface, err := net.InterfaceByName("eth1")
+	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return 0, fmt.Errorf("interface lookup failed: %w", err)
 	}

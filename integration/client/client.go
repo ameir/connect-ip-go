@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,9 +10,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"os/exec"
-	"strconv"
-	"syscall"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
@@ -26,16 +22,15 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+const (
+	proxyPort   = 443
+	PROXY_ADDR  = "194.166.0.2"
+	SERVER_ADDR = "194.166.100.3"
+)
+
 func main() {
-	proxyPort, err := strconv.Atoi(os.Getenv("PROXY_PORT"))
-	if err != nil {
-		log.Fatalf("failed to parse proxy port: %v", err)
-	}
-	proxyAddr := netip.AddrPortFrom(netip.MustParseAddr(os.Getenv("PROXY_ADDR")), uint16(proxyPort))
-	serverAddr, err := netip.ParseAddr(os.Getenv("SERVER_ADDR"))
-	if err != nil {
-		log.Fatalf("failed to parse server URL: %v", err)
-	}
+
+	proxyAddr := netip.AddrPortFrom(netip.MustParseAddr(PROXY_ADDR), uint16(proxyPort))
 
 	keyLog, err := os.Create("keys.txt")
 	if err != nil {
@@ -44,75 +39,11 @@ func main() {
 	defer keyLog.Close()
 	dev, ipconn, err := establishConn(proxyAddr, keyLog)
 	if err != nil {
-		log.Fatalf("failed to establish connection: %v", err)
+		log.Fatalf("failed to establish connection to %s: %v", err, proxyAddr)
 	}
-	cmd := exec.Command("tcpdump", "-i", dev.Name(), "-w", "client.pcap", "-U")
-	if err := cmd.Start(); err != nil {
-		log.Fatalf("failed to start tcpdump: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond) // give tcpdump some time to start
-	log.Printf("started tcpdump on TUN device: %s in the background", dev.Name())
-	go proxy(ipconn, dev)
+	log.Println("created tun interface", dev.Name())
 
-	switch os.Getenv("TESTCASE") {
-	case "ping":
-		if err := runPingTest(serverAddr, 50); err != nil {
-			log.Fatalf("ping test failed: %v", err)
-		}
-	case "http":
-		if err := runHTTPTest(http.DefaultTransport, fmt.Sprintf("http://%s/hello", ipForURL(serverAddr))); err != nil {
-			log.Fatalf("HTTP test failed: %v", err)
-		}
-	case "http3":
-		tr := &http3.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			QUICConfig: &quic.Config{
-				InitialPacketSize: 1200,
-				EnableDatagrams:   true,
-			},
-		}
-		defer tr.Close()
-		if err := runHTTPTest(tr, fmt.Sprintf("https://%s/hello", ipForURL(serverAddr))); err != nil {
-			log.Fatalf("HTTP/3 test failed: %v", err)
-		}
-	case "filtertcp":
-		// ICMP is always allowed
-		if err := runPingTest(serverAddr, 10); err != nil {
-			log.Fatalf("ping test failed: %v", err)
-		}
-		// TCP is explicitly allowed
-		if err := runHTTPTest(http.DefaultTransport, fmt.Sprintf("http://%s/hello", ipForURL(serverAddr))); err != nil {
-			log.Fatalf("HTTP test failed: %v", err)
-		}
-		// UDP is not allowed
-		tr := &http3.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			QUICConfig: &quic.Config{
-				InitialPacketSize:    1200,
-				EnableDatagrams:      true,
-				HandshakeIdleTimeout: time.Second,
-			},
-		}
-		defer tr.Close()
-		err := runHTTPTest(tr, fmt.Sprintf("https://%s/hello", ipForURL(serverAddr)))
-		if err == nil || !errors.Is(err, &quic.IdleTimeoutError{}) {
-			log.Fatalf("HTTP/3 test should have resulted in a timeout error, but got: %v", err)
-		}
-	case "filetransfer":
-		if err := downloadViaHTTPTest(http.DefaultTransport, fmt.Sprintf("http://%s/data/", ipForURL(serverAddr)), 1<<20); err != nil {
-			log.Fatalf("HTTP test failed: %v", err)
-		}
-	default:
-		log.Fatalf("unknown testcase: %s", os.Getenv("TESTCASE"))
-	}
-
-	time.Sleep(time.Second) // give tcpdump some time to write the last packets
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		log.Printf("failed to send SIGTERM signal to tcpdump process: %v", err)
-	}
-	if err := cmd.Wait(); err != nil {
-		log.Printf("tcpdump process exited with error: %v", err)
-	}
+	proxy(ipconn, dev)
 }
 
 func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface, *connectip.Conn, error) {
@@ -137,6 +68,8 @@ func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface
 		&quic.Config{
 			EnableDatagrams:   true,
 			InitialPacketSize: 1350,
+			KeepAlivePeriod:   30 * time.Second,
+			MaxIdleTimeout:    time.Hour,
 		},
 	)
 	if err != nil {
@@ -191,7 +124,7 @@ func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface
 				LinkIndex: link.Attrs().Index,
 				Dst:       utils.PrefixToIPNet(prefix),
 			}
-			if err := netlink.RouteAdd(r); err != nil {
+			if err := netlink.RouteReplace(r); err != nil {
 				return nil, nil, fmt.Errorf("failed to add route: %w", err)
 			}
 		}
@@ -200,16 +133,19 @@ func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface
 }
 
 func proxy(ipconn *connectip.Conn, dev *water.Interface) error {
+	defer closeDev(dev)
+	defer ipconn.Close()
+
 	errChan := make(chan error, 2)
 	go func() {
 		for {
 			b := make([]byte, 1500)
 			n, err := ipconn.ReadPacket(b)
 			if err != nil {
-				errChan <- fmt.Errorf("failed to read from connection: %w", err)
-				return
+				fmt.Printf("failed to read from connection: %s", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
-			log.Printf("Read %d bytes from connection", n)
 			if _, err := dev.Write(b[:n]); err != nil {
 				errChan <- fmt.Errorf("failed to write to TUN: %w", err)
 				return
@@ -225,11 +161,11 @@ func proxy(ipconn *connectip.Conn, dev *water.Interface) error {
 				errChan <- fmt.Errorf("failed to read from TUN: %w", err)
 				return
 			}
-			log.Printf("read %d bytes from TUN", n)
 			icmp, err := ipconn.WritePacket(b[:n])
 			if err != nil {
-				errChan <- fmt.Errorf("failed to write to connection: %w", err)
-				return
+				fmt.Printf("failed to write to connection: %s", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 			if len(icmp) > 0 {
 				log.Printf("sending ICMP packet on %s", dev.Name())
@@ -242,8 +178,6 @@ func proxy(ipconn *connectip.Conn, dev *water.Interface) error {
 
 	err := <-errChan
 	log.Printf("error proxying: %v", err)
-	dev.Close()
-	ipconn.Close()
 	<-errChan // wait for the other goroutine to finish
 	return err
 }
@@ -253,4 +187,10 @@ func ipForURL(addr netip.Addr) string {
 		return addr.String()
 	}
 	return fmt.Sprintf("[%s]", addr)
+}
+
+func closeDev(dev *water.Interface) {
+	if dev != nil {
+		dev.Close()
+	}
 }

@@ -311,6 +311,8 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 		}
 	}
 
+	//return nil
+
 	// The destination IP address is valid if it
 	// 1. is within one of the ranges assigned to us, or
 	// 2. is within one of the ranges that we advertised to the peer.

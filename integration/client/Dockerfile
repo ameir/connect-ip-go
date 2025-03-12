@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && \
-	DEBIAN_FRONTEND=noninteractive apt-get install -y tcpdump iputils-ping iproute2 tcpdump
+	DEBIAN_FRONTEND=noninteractive apt-get install -y tcpdump iputils-ping iproute2 net-tools curl iperf3
 
 COPY client /client
 
