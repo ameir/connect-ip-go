@@ -27,11 +27,11 @@ import (
 
 var serverSocketRcv, serverSocketSend int
 
-const ifaceName = "eth1"
+const ifaceName = "eth0"
 
 const (
-	PROXY_ADDR  = "0.0.0.0"
-	PROXY_PORT  = "443"
+	PROXY_ADDR  = "141.11.210.95"
+	PROXY_PORT  = "8443"
 	ASSIGN_ADDR = "194.166.0.10"
 	//ROUTE              = "194.166.100.0/24"
 	ROUTE              = "0.0.0.0/0"
@@ -69,6 +69,11 @@ func main() {
 		log.Fatalf("failed to parse %s address", ifaceName)
 	}
 
+	if err := run(bindProxyTo, assignAddr, route, uint8(ipProtocol)); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("ethAddr:", ethAddr.String())
 	fdRcv, err := createReceiveSocket(ethAddr)
 	if err != nil {
 		log.Fatalf("failed to create receive socket: %v", err)
@@ -159,6 +164,8 @@ func run(bindTo netip.AddrPort, remoteAddr netip.Addr, route netip.Prefix, ipPro
 	}
 	defer udpConn.Close()
 
+	fmt.Println("bound to:", udpConn.LocalAddr().String(), "port:", bindTo.Port())
+
 	cert, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
 	if err != nil {
 		return fmt.Errorf("failed to load TLS certificate: %w", err)
@@ -168,16 +175,28 @@ func run(bindTo netip.AddrPort, remoteAddr netip.Addr, route netip.Prefix, ipPro
 	ln, err := quic.ListenEarly(
 		udpConn,
 		http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}}),
-		&quic.Config{EnableDatagrams: true},
+		&quic.Config{
+			EnableDatagrams: true,
+			KeepAlivePeriod: 30 * time.Second,
+			MaxIdleTimeout:  time.Hour,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create QUIC listener: %w", err)
 	}
 	defer ln.Close()
+	fmt.Println("created QUIC listener")
 
 	p := connectip.Proxy{}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("in mux /")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	})
+
 	mux.HandleFunc("/vpn", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("in mux")
 		req, err := connectip.ParseRequest(r, template)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -193,24 +212,35 @@ func run(bindTo netip.AddrPort, remoteAddr netip.Addr, route netip.Prefix, ipPro
 		if err := handleConn(conn, remoteAddr, route, ipProtocol); err != nil {
 			log.Printf("failed to handle connection: %v", err)
 		}
+		log.Println("connection remoteAddr:", remoteAddr)
+
 	})
+	fmt.Println("starting server")
+
 	s := http3.Server{
-		Handler:         mux,
+		//	Handler:         mux,
 		EnableDatagrams: true,
 	}
-	go s.ServeListener(ln)
+	err = s.ServeListener(ln)
+	if err != nil {
+		return fmt.Errorf("failed to serve listener: %w", err)
+	}
+	fmt.Println("started server")
+
 	defer s.Close()
 
 	select {}
 }
 
 func handleConn(conn *connectip.Conn, addr netip.Addr, route netip.Prefix, ipProtocol uint8) error {
+	fmt.Println("handleConn")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := conn.AssignAddresses(ctx, []netip.Prefix{netip.PrefixFrom(addr, addr.BitLen())}); err != nil {
 		return fmt.Errorf("failed to assign addresses: %w", err)
 	}
+	fmt.Println("AssignAddresses", addr.String())
 	if err := conn.AdvertiseRoute(ctx, []connectip.IPRoute{
 		{StartIP: route.Addr(), EndIP: utils.LastIP(route), IPProtocol: ipProtocol},
 	}); err != nil {

@@ -23,13 +23,14 @@ import (
 )
 
 const (
-	proxyPort   = 443
-	PROXY_ADDR  = "194.166.0.2"
-	SERVER_ADDR = "194.166.100.3"
+	proxyPort = 8443
+
+// PROXY_ADDR = "89.117.96.205"
 )
 
 func main() {
 
+	PROXY_ADDR := os.Getenv("PROXY_ADDR")
 	proxyAddr := netip.AddrPortFrom(netip.MustParseAddr(PROXY_ADDR), uint16(proxyPort))
 
 	keyLog, err := os.Create("keys.txt")
@@ -66,10 +67,11 @@ func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface
 			KeyLogWriter:       keyLog,
 		},
 		&quic.Config{
-			EnableDatagrams:   true,
-			InitialPacketSize: 1350,
-			KeepAlivePeriod:   30 * time.Second,
-			MaxIdleTimeout:    time.Hour,
+			EnableDatagrams:      true,
+			InitialPacketSize:    1350,
+			KeepAlivePeriod:      30 * time.Second,
+			MaxIdleTimeout:       time.Hour,
+			HandshakeIdleTimeout: time.Minute,
 		},
 	)
 	if err != nil {
@@ -81,6 +83,7 @@ func establishConn(proxyAddr netip.AddrPort, keyLog io.Writer) (*water.Interface
 
 	template := uritemplate.MustNew(fmt.Sprintf("https://proxy:%d/vpn", proxyAddr.Port()))
 	ipconn, rsp, err := connectip.Dial(ctx, hconn, template)
+	fmt.Printf("template.Raw(): %s\n", template.Raw())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to dial connect-ip connection: %w", err)
 	}
